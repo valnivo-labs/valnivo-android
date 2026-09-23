@@ -43,6 +43,15 @@
 # Runs only when somebody with write access presses Run workflow: no push, no
 # pull request, so no fork can ever reach the signing secrets.
 #
+# DRY RUN (2026-09-23)
+#
+# Ticking `dryRun` proves everything but the signing: the read-only checkout,
+# the tests, the build, the advertising-permission check and the attestation.
+# It needs no keystore, builds an UNSIGNED APK named valnivo-unsigned-dryrun.apk
+# so its attestation cannot be mistaken for a release's, and publishes nothing —
+# no tag, no release, and the app's download button is untouched. It exists
+# because the direct keystore was on another machine the day this moved here.
+#
 # Secrets, set in THIS repository: LEDGGER_READ_TOKEN, ANDROID_DIRECT_KEYSTORE_B64,
 # ANDROID_DIRECT_KEYSTORE_PASSWORD, FIREBASE_API_KEY, FIREBASE_APP_ID,
 # FIREBASE_PROJECT_ID, GOOGLE_WEB_CLIENT_ID.
@@ -59,6 +68,11 @@ on:
         description: 'Version shown to people (blank = 2.1.<run number>-direct)'
         required: false
         default: ''
+      dryRun:
+        description: 'Dry run: build unsigned, attest, publish nothing'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -98,6 +112,7 @@ jobs:
         run: ./gradlew --no-daemon --quiet testDebugUnitTest
 
       - name: Restore the direct-download keystore
+        if: ${{ !inputs.dryRun }}
         run: |
           if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
             echo "Add the secrets ANDROID_DIRECT_KEYSTORE_B64 and ANDROID_DIRECT_KEYSTORE_PASSWORD to this repository." >&2
@@ -112,9 +127,18 @@ jobs:
       - name: Work out the version
         run: |
           echo "VERSION_CODE=$((600 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
-          echo "VERSION_NAME=${NAME:-2.1.$GITHUB_RUN_NUMBER-direct}" >> "$GITHUB_ENV"
+          if [ "$DRY" = "true" ]; then
+            echo "VERSION_NAME=2.1.$GITHUB_RUN_NUMBER-dryrun-direct" >> "$GITHUB_ENV"
+            echo "APK_IN=app-release-unsigned.apk" >> "$GITHUB_ENV"
+            echo "APK_OUT=valnivo-unsigned-dryrun.apk" >> "$GITHUB_ENV"
+          else
+            echo "VERSION_NAME=${NAME:-2.1.$GITHUB_RUN_NUMBER-direct}" >> "$GITHUB_ENV"
+            echo "APK_IN=app-release.apk" >> "$GITHUB_ENV"
+            echo "APK_OUT=valnivo.apk" >> "$GITHUB_ENV"
+          fi
         env:
           NAME: ${{ inputs.versionName }}
+          DRY: ${{ inputs.dryRun }}
 
       # No bundle: a .aab exists only to be uploaded to a store, and this key
       # must never reach one.
@@ -142,18 +166,22 @@ jobs:
       # advertising identifier.
       - name: Check what signed it, and what it asks for
         run: |
-          APK=source/android/app/build/outputs/apk/release/app-release.apk
+          APK=source/android/app/build/outputs/apk/release/$APK_IN
           [ -f "$APK" ] || { echo "::error::$APK was not produced" >&2; exit 1; }
           TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
-          CERTS=$("$TOOLS/apksigner" verify --print-certs "$APK")
-          echo "$CERTS" | grep -E 'certificate DN|SHA-256 digest'
-          if ! echo "$CERTS" | grep -q 'O=Valnivo Labs'; then
-            echo "::error::the direct download must be signed with the neutral certificate (O=Valnivo Labs)" >&2
-            exit 1
-          fi
-          if echo "$CERTS" | grep -Eiq 'kabil|jbeli'; then
-            echo "::error::the signing certificate names a person" >&2
-            exit 1
+          if [ "$DRY" = "true" ]; then
+            echo "dry run: unsigned, so there is no certificate to check"
+          else
+            CERTS=$("$TOOLS/apksigner" verify --print-certs "$APK")
+            echo "$CERTS" | grep -E 'certificate DN|SHA-256 digest'
+            if ! echo "$CERTS" | grep -q 'O=Valnivo Labs'; then
+              echo "::error::the direct download must be signed with the neutral certificate (O=Valnivo Labs)" >&2
+              exit 1
+            fi
+            if echo "$CERTS" | grep -Eiq 'kabil|jbeli'; then
+              echo "::error::the signing certificate names a person" >&2
+              exit 1
+            fi
           fi
           PERMS=$("$TOOLS/aapt2" dump permissions "$APK")
           FOUND=$(echo "$PERMS" | grep -E 'com\.google\.android\.gms\.permission\.AD_ID|ACCESS_ADSERVICES_' || true)
@@ -162,19 +190,23 @@ jobs:
             exit 1
           fi
           echo "no advertising permission of any kind"
-          cp "$APK" "$RUNNER_TEMP/valnivo.apk"
-          ( cd "$RUNNER_TEMP" && sha256sum valnivo.apk > valnivo.apk.sha256 )
-          echo "SIZE_MB=$(awk "BEGIN { printf \"%.1f\", $(wc -c < "$RUNNER_TEMP/valnivo.apk") / 1048576 }")" >> "$GITHUB_ENV"
-          echo "SHA256=$(cut -d' ' -f1 "$RUNNER_TEMP/valnivo.apk.sha256")" >> "$GITHUB_ENV"
+          cp "$APK" "$RUNNER_TEMP/$APK_OUT"
+          ( cd "$RUNNER_TEMP" && sha256sum "$APK_OUT" > "$APK_OUT.sha256" )
+          echo "SIZE_MB=$(awk "BEGIN { printf \"%.1f\", $(wc -c < "$RUNNER_TEMP/$APK_OUT") / 1048576 }")" >> "$GITHUB_ENV"
+          echo "SHA256=$(cut -d' ' -f1 "$RUNNER_TEMP/$APK_OUT.sha256")" >> "$GITHUB_ENV"
+          echo "built $APK_OUT, sha256 $(cut -d' ' -f1 "$RUNNER_TEMP/$APK_OUT.sha256")"
+        env:
+          DRY: ${{ inputs.dryRun }}
 
       # The point of building here. Signed with this workflow's identity
       # through GitHub's OIDC token; recorded in the public transparency log.
       - name: Attest where the APK was built
         uses: actions/attest@v4
         with:
-          subject-path: ${{ runner.temp }}/valnivo.apk
+          subject-path: ${{ runner.temp }}/${{ env.APK_OUT }}
 
       - name: Publish the release
+        if: ${{ !inputs.dryRun }}
         run: |
           cat > "$RUNNER_TEMP/notes.md" <<EOF
           The Android app, installable without Google Play.
