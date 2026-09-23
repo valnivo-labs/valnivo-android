@@ -1,0 +1,207 @@
+# Builds, attests and publishes the direct-download APK — in PUBLIC.
+#
+# This file lives in the private repository `kabilJbeli/ledgger` at
+# tools/public-builds/valnivo-android.yml, where tests/publicBuild.test.ts holds
+# it to its rules, and is COPIED to `valnivo-labs/valnivo-android` as
+# .github/workflows/build.yml. Edit it there only by copying from here.
+#
+# WHY IT RUNS HERE AND NOT IN THE PRIVATE REPOSITORY (owner, 2026-09-23)
+#
+# GitHub artifact attestations are available to private repositories only on
+# GitHub Enterprise Cloud. This repository is public, so the attestation is
+# available — and it is TRUE, because the APK is built here, by this workflow:
+# `gh attestation verify valnivo.apk --repo valnivo-labs/valnivo-android`
+# proves which run of which workflow produced the exact file somebody
+# downloaded. Uploading a file built elsewhere and attesting it here would be a
+# false statement about where it was built, so the build itself moved.
+#
+# THE SOURCE STAYS PRIVATE
+#
+# The app's source is checked out from the private repository with a read-only
+# token (`LEDGGER_READ_TOKEN`: a fine-grained token, Contents: read, on that one
+# repository), onto the runner, for the length of the job. Nothing uploads it:
+# there is NO upload-artifact step, and the only files published are the APK
+# and its checksum, as release assets. The build log is public, so the build
+# runs with Gradle's --quiet and prints the certificate and permissions it
+# checks, not the tree. The attestation records this workflow, this repository
+# and the source commit, which says that the private repository exists and
+# which commit was built — not what is in it.
+#
+# SIGNING
+#
+# The neutral certificate `CN=Valnivo, O=Valnivo Labs`, never the Play upload
+# key (whose certificate names a person). Asserted below; a mis-wired secret
+# fails the build instead of publishing a name. docs/direct-apk.md.
+#
+# VERSION CODES
+#
+# 600 + this repository's run number. The private repository's builds used
+# 500 + its own run number and reached 2.0.3-direct; run numbers restart at 1
+# in a new repository, and a lower code is a DOWNGRADE Android refuses to
+# install over the previous APK. The name continues at 2.1.<run>-direct.
+#
+# Runs only when somebody with write access presses Run workflow: no push, no
+# pull request, so no fork can ever reach the signing secrets.
+#
+# Secrets, set in THIS repository: LEDGGER_READ_TOKEN, ANDROID_DIRECT_KEYSTORE_B64,
+# ANDROID_DIRECT_KEYSTORE_PASSWORD, FIREBASE_API_KEY, FIREBASE_APP_ID,
+# FIREBASE_PROJECT_ID, GOOGLE_WEB_CLIENT_ID.
+name: Build, attest and publish the APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Commit, tag or branch of the app to build'
+        required: true
+        default: 'main'
+      versionName:
+        description: 'Version shown to people (blank = 2.1.<run number>-direct)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write # the release
+      id-token: write # the identity the attestation is signed with
+      attestations: write
+    steps:
+      - name: Check out the app source (private, read-only)
+        uses: actions/checkout@v7
+        with:
+          repository: kabilJbeli/ledgger
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.LEDGGER_READ_TOKEN }}
+          path: source
+          persist-credentials: false
+
+      - name: Record which commit is being built
+        run: echo "SOURCE_SHA=$(git -C source rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Test
+        working-directory: source/android
+        run: ./gradlew --no-daemon --quiet testDebugUnitTest
+
+      - name: Restore the direct-download keystore
+        run: |
+          if [ -z "$KEYSTORE_B64" ] || [ -z "$KEYSTORE_PASSWORD" ]; then
+            echo "Add the secrets ANDROID_DIRECT_KEYSTORE_B64 and ANDROID_DIRECT_KEYSTORE_PASSWORD to this repository." >&2
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/direct.keystore"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/direct.keystore" >> "$GITHUB_ENV"
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_DIRECT_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_DIRECT_KEYSTORE_PASSWORD }}
+
+      - name: Work out the version
+        run: |
+          echo "VERSION_CODE=$((600 + GITHUB_RUN_NUMBER))" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=${NAME:-2.1.$GITHUB_RUN_NUMBER-direct}" >> "$GITHUB_ENV"
+        env:
+          NAME: ${{ inputs.versionName }}
+
+      # No bundle: a .aab exists only to be uploaded to a store, and this key
+      # must never reach one.
+      - name: Build and sign
+        working-directory: source/android
+        run: |
+          case "$VERSION_NAME" in *-direct) ;; *) echo "::error::the version must end in -direct" >&2; exit 1;; esac
+          ./gradlew --no-daemon --quiet assembleRelease \
+            -PANDROID_VERSION_CODE="$VERSION_CODE" \
+            -PANDROID_VERSION_NAME="$VERSION_NAME" \
+            -PFIREBASE_API_KEY="$FIREBASE_API_KEY" \
+            -PFIREBASE_APP_ID="$FIREBASE_APP_ID" \
+            -PFIREBASE_PROJECT_ID="$FIREBASE_PROJECT_ID" \
+            -PGOOGLE_WEB_CLIENT_ID="$GOOGLE_WEB_CLIENT_ID"
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ env.ANDROID_KEYSTORE_PATH }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_DIRECT_KEYSTORE_PASSWORD }}
+          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+          FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          GOOGLE_WEB_CLIENT_ID: ${{ secrets.GOOGLE_WEB_CLIENT_ID }}
+
+      # If the wrong secret is wired in, the build fails here rather than
+      # publishing a file whose certificate names a person or that asks for an
+      # advertising identifier.
+      - name: Check what signed it, and what it asks for
+        run: |
+          APK=source/android/app/build/outputs/apk/release/app-release.apk
+          [ -f "$APK" ] || { echo "::error::$APK was not produced" >&2; exit 1; }
+          TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          CERTS=$("$TOOLS/apksigner" verify --print-certs "$APK")
+          echo "$CERTS" | grep -E 'certificate DN|SHA-256 digest'
+          if ! echo "$CERTS" | grep -q 'O=Valnivo Labs'; then
+            echo "::error::the direct download must be signed with the neutral certificate (O=Valnivo Labs)" >&2
+            exit 1
+          fi
+          if echo "$CERTS" | grep -Eiq 'kabil|jbeli'; then
+            echo "::error::the signing certificate names a person" >&2
+            exit 1
+          fi
+          PERMS=$("$TOOLS/aapt2" dump permissions "$APK")
+          FOUND=$(echo "$PERMS" | grep -E 'com\.google\.android\.gms\.permission\.AD_ID|ACCESS_ADSERVICES_' || true)
+          if [ -n "$FOUND" ]; then
+            echo "::error::advertising permissions present: $FOUND" >&2
+            exit 1
+          fi
+          echo "no advertising permission of any kind"
+          cp "$APK" "$RUNNER_TEMP/valnivo.apk"
+          ( cd "$RUNNER_TEMP" && sha256sum valnivo.apk > valnivo.apk.sha256 )
+          echo "SIZE_MB=$(awk "BEGIN { printf \"%.1f\", $(wc -c < "$RUNNER_TEMP/valnivo.apk") / 1048576 }")" >> "$GITHUB_ENV"
+          echo "SHA256=$(cut -d' ' -f1 "$RUNNER_TEMP/valnivo.apk.sha256")" >> "$GITHUB_ENV"
+
+      # The point of building here. Signed with this workflow's identity
+      # through GitHub's OIDC token; recorded in the public transparency log.
+      - name: Attest where the APK was built
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ runner.temp }}/valnivo.apk
+
+      - name: Publish the release
+        run: |
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          The Android app, installable without Google Play.
+
+          **Version** $VERSION_NAME (version code $VERSION_CODE) · $SIZE_MB MB
+          **SHA-256** \`$SHA256\`
+          **Signed by** \`CN=Valnivo, O=Valnivo Labs, L=Luxembourg, C=LU\`
+          **Built by** this repository's workflow, run $GITHUB_RUN_NUMBER, from app commit \`$SOURCE_SHA\`
+
+          Check that this file was built here: \`gh attestation verify valnivo.apk --repo $GITHUB_REPOSITORY\`
+
+          Before you install:
+
+          - Android will ask permission to install from this source. That prompt is the operating system, not a fault.
+          - It does not update itself. A new version means downloading it again.
+          - It carries our own signing certificate rather than Google's, so Android treats it as a different app from the Google Play copy. The two cannot be installed over one another, and switching either way means uninstalling first, which erases figures kept only on the device unless you are signed in and have an encrypted cloud copy.
+          - It serves no ads and holds no advertising identifier.
+
+          The app itself is <https://valnivo.eu>, which needs no installation at all.
+          EOF
+          gh release create "v$VERSION_NAME" \
+            "$RUNNER_TEMP/valnivo.apk" "$RUNNER_TEMP/valnivo.apk.sha256" \
+            --repo "$GITHUB_REPOSITORY" --title "Valnivo $VERSION_NAME" \
+            --notes-file "$RUNNER_TEMP/notes.md" --latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Remove the keystore and the source from the runner
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/direct.keystore" source
