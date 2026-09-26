@@ -1,6 +1,6 @@
 # Builds, attests and publishes the direct-download APK — in PUBLIC.
 #
-# This file lives in the private repository `kabilJbeli/ledgger` at
+# This file lives in the private repository `valnivo-labs/ledgger` at
 # tools/public-builds/valnivo-android.yml, where tests/publicBuild.test.ts holds
 # it to its rules, and is COPIED to `valnivo-labs/valnivo-android` as
 # .github/workflows/build.yml. Edit it there only by copying from here.
@@ -93,7 +93,7 @@ jobs:
       - name: Check out the app source (private, read-only)
         uses: actions/checkout@v7
         with:
-          repository: kabilJbeli/ledgger
+          repository: valnivo-labs/ledgger
           ref: ${{ inputs.ref }}
           token: ${{ secrets.LEDGGER_READ_TOKEN }}
           path: source
