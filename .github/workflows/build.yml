@@ -18,8 +18,9 @@
 # THE SOURCE STAYS PRIVATE
 #
 # The app's source is checked out from the private repository with a read-only
-# token (`LEDGGER_READ_TOKEN`: a fine-grained token, Contents: read, on that one
-# repository), onto the runner, for the length of the job. Nothing uploads it:
+# deploy key (`LEDGGER_SOURCE_DEPLOY_KEY`, since 2026-09-29: the repository's own
+# key, not a person's token, which had lapsed when the repository moved to the
+# organisation), onto the runner, for the length of the job. Nothing uploads it:
 # there is NO upload-artifact step, and the only files published are the APK
 # and its checksum, as release assets. The build log is public, so the build
 # runs with Gradle's --quiet and prints the certificate and permissions it
@@ -52,7 +53,7 @@
 # no tag, no release, and the app's download button is untouched. It exists
 # because the direct keystore was on another machine the day this moved here.
 #
-# Secrets, set in THIS repository: LEDGGER_READ_TOKEN, ANDROID_DIRECT_KEYSTORE_B64,
+# Secrets, set in THIS repository: LEDGGER_SOURCE_DEPLOY_KEY, ANDROID_DIRECT_KEYSTORE_B64,
 # ANDROID_DIRECT_KEYSTORE_PASSWORD, FIREBASE_API_KEY, FIREBASE_APP_ID,
 # FIREBASE_PROJECT_ID, GOOGLE_WEB_CLIENT_ID.
 name: Build, attest and publish the APK
@@ -95,7 +96,7 @@ jobs:
         with:
           repository: valnivo-labs/ledgger
           ref: ${{ inputs.ref }}
-          token: ${{ secrets.LEDGGER_READ_TOKEN }}
+          ssh-key: ${{ secrets.LEDGGER_SOURCE_DEPLOY_KEY }}
           path: source
           persist-credentials: false
 
