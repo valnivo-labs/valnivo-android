@@ -199,12 +199,10 @@ jobs:
           # tools/release.generated.ts): the exact subject, the pinned SHA-256, and
           # no advertising permission, the same checks every product's download runs.
           if [ "$DRY" != "true" ]; then
-            printf '%s
-' "$CERTS" > "$RUNNER_TEMP/certs.txt"
+            echo "$CERTS" > "$RUNNER_TEMP/certs.txt"
             node source/tools/release.generated.ts cert valnivo "$RUNNER_TEMP/certs.txt"
           fi
-          printf '%s
-' "$PERMS" > "$RUNNER_TEMP/perms.txt"
+          echo "$PERMS" > "$RUNNER_TEMP/perms.txt"
           node source/tools/release.generated.ts permissions valnivo "$RUNNER_TEMP/perms.txt"
           cp "$APK" "$RUNNER_TEMP/$APK_OUT"
           ( cd "$RUNNER_TEMP" && sha256sum "$APK_OUT" > "$APK_OUT.sha256" )
