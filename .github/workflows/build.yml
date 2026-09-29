@@ -102,6 +102,11 @@ jobs:
       - name: Record which commit is being built
         run: echo "SOURCE_SHA=$(git -C source rev-parse HEAD)" >> "$GITHUB_ENV"
 
+      # Valnivo Labs' release rules run with Node's own type stripping (22.18 or later).
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -190,6 +195,17 @@ jobs:
             exit 1
           fi
           echo "no advertising permission of any kind"
+          # And Valnivo Labs' release rules (valnivo-labs/foundation, copy in
+          # tools/release.generated.ts): the exact subject, the pinned SHA-256, and
+          # no advertising permission, the same checks every product's download runs.
+          if [ "$DRY" != "true" ]; then
+            printf '%s
+' "$CERTS" > "$RUNNER_TEMP/certs.txt"
+            node source/tools/release.generated.ts cert valnivo "$RUNNER_TEMP/certs.txt"
+          fi
+          printf '%s
+' "$PERMS" > "$RUNNER_TEMP/perms.txt"
+          node source/tools/release.generated.ts permissions valnivo "$RUNNER_TEMP/perms.txt"
           cp "$APK" "$RUNNER_TEMP/$APK_OUT"
           ( cd "$RUNNER_TEMP" && sha256sum "$APK_OUT" > "$APK_OUT.sha256" )
           echo "SIZE_MB=$(awk "BEGIN { printf \"%.1f\", $(wc -c < "$RUNNER_TEMP/$APK_OUT") / 1048576 }")" >> "$GITHUB_ENV"
@@ -231,6 +247,9 @@ jobs:
             "$RUNNER_TEMP/valnivo.apk" "$RUNNER_TEMP/valnivo.apk.sha256" \
             --repo "$GITHUB_REPOSITORY" --title "Valnivo $VERSION_NAME" \
             --notes-file "$RUNNER_TEMP/notes.md" --latest
+          # The page must now show this workflow, not a person, as the publisher.
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          node source/tools/release.generated.ts releases valnivo "$RUNNER_TEMP/releases.json"
         env:
           GH_TOKEN: ${{ github.token }}
 
