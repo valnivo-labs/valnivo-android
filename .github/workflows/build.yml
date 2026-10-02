@@ -249,6 +249,14 @@ jobs:
           # The page must now show this workflow, not a person, as the publisher.
           gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
           node source/tools/release.generated.ts releases valnivo "$RUNNER_TEMP/releases.json"
+          # One release, never a history of them (owner, 2026-10-01): every other
+          # release goes, with its tag. The download link reads /releases/latest,
+          # which is the one just made.
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName --jq '.[].tagName' |
+            while read -r tag; do
+              [ "$tag" = "v$VERSION_NAME" ] && continue
+              gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+            done
         env:
           GH_TOKEN: ${{ github.token }}
 
